@@ -7,7 +7,7 @@ from tensorflow.keras.models import load_model
 # KONFIGURATION
 # =============================================================================
 # Pfad zum trainierten Modell (muss mit der Pipeline übereinstimmen)
-MODELL_DATEI = "night_model.keras"
+MODELL_DATEI = "TRAIN_model.keras"
 
 # Die ID des Sterns, den wir untersuchen wollen (z.B. KIC 8311864)
 TARGET_ID = "KIC 8311864"
