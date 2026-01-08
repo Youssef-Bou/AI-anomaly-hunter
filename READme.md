@@ -13,13 +13,13 @@ Kernfunktionen:
 ## Struktur
 * TRAIN_HUNTER_pipeline.py: Die Haupt-Pipeline. Fuehrt automatisiert den Download von Trainingsdaten, das Modell-Training und die Suche (Inferenz) durch.
 * check_anomaly.py: Analyse-Tool zur Visualisierung gefundener Kandidaten und Berechnung der Dip-Tiefe.
-* train_model_v2.py: Skript fuer manuelles Modell-Training und Hyperparameter-Tuning.
+
 
 ## Installation & Nutzung
 
 1. Repository klonen:
-   git clone https://github.com/DEIN_USERNAME/anomaly-hunter.git
-   cd anomaly-hunter
+   git clone https://github.com/Youssef-Bou/AI-anomaly-hunter.git
+   cd AI-anomaly-hunter
 
 2. Abhaengigkeiten installieren:
    pip install -r requirements.txt
