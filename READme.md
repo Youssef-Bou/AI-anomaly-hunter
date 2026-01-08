@@ -18,7 +18,7 @@ Kernfunktionen:
 ## Installation & Nutzung
 
 1. Repository klonen:
-   git clone https://github.com/DEIN_USERNAME/anomaly-hunter.git
+   git clone https://github.com/Youssef-Bou/AI-anomaly-hunter.git
    cd anomaly-hunter
 
 2. Abhaengigkeiten installieren:
