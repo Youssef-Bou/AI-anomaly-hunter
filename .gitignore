@@ -1,0 +1,19 @@
+# Python Müll
+__pycache__/
+*.py[cod]
+
+# Daten-Ordner (NICHT hochladen!)
+training_data/
+pipeline_train_data/
+
+# Große Dateien & Listen
+*.npy
+*.csv
+keplerstellar.csv
+anomalie_ergebnisse.csv
+
+# Modelle (Optional: Wenn sie > 100MB sind, hier entkommentieren)
+# *.keras
+
+# Systemdateien
+.DS_Store
