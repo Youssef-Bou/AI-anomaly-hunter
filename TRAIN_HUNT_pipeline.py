@@ -25,7 +25,7 @@ RESULT_FILE = "anomalie_ergebnisse.csv"
 
 # Pfade & Speicherorte
 TRAIN_DIR = "pipeline_train_data"    # Temporärer Ordner für Trainingsdaten (.npy)
-MODEL_PATH = "night_model.keras"     # Dateiname des trainierten Modells
+MODEL_PATH = "TRAIN_model.keras"     # Dateiname des trainierten Modells
 
 # Steuerung der Datenmenge (Zeitmanagement)
 # N_TRAIN_DOWNLOAD: Wie viele Sterne sollen gelernt werden? (ca. 1000 = 45 Min)
