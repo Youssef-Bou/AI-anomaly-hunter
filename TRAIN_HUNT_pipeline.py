@@ -13,9 +13,10 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from tensorflow.keras.layers import Conv1D, Input, MaxPooling1D, UpSampling1D
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.layers import Conv1D, Input, MaxPooling1D, UpSampling1D, BatchNormalization
 from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.optimizers import Adam
 
 
 @dataclass
@@ -25,6 +26,7 @@ class PipelineConfig:
     result_file: Path = Path("anomalie_ergebnisse.csv")
     train_dir: Path = Path("pipeline_train_data")
     model_path: Path = Path("TRAIN_model.keras")
+    threshold_path: Path = Path("mse_threshold.npy")
     n_train_download: int = 2000
     n_search_analysis: int = 5000
     data_points: int = 1000
@@ -35,6 +37,7 @@ class PipelineConfig:
     flatten_window_length: int = 401
     checkpoint_every: int = 20
     random_state: int = 42
+    augment_data: bool = True
     log_level: str = "INFO"
 
 
@@ -60,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--flatten-window-length", type=int, default=401)
     parser.add_argument("--checkpoint-every", type=int, default=20)
+    parser.add_argument("--no-augment", action="store_true", help="Disable data augmentation")
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
@@ -78,6 +82,7 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         epochs=args.epochs,
         flatten_window_length=args.flatten_window_length,
         checkpoint_every=args.checkpoint_every,
+        augment_data=not args.no_augment,
         log_level=args.log_level,
     )
 
@@ -125,6 +130,13 @@ def preprocess_lc(lc, config: PipelineConfig) -> Optional[np.ndarray]:
     except Exception as exc:
         logging.exception("Preprocessing failed: %s", exc)
         return None
+
+
+def augment_batch(x: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Apply random noise + time-shift augmentation to a batch (shape: N, T, 1)."""
+    noise = rng.normal(0, 0.0005, x.shape).astype(np.float32)
+    shift = int(rng.integers(-50, 51))
+    return np.roll(x + noise, shift, axis=1)
 
 
 def search_and_download(target: str):
@@ -216,20 +228,48 @@ def load_training_arrays(config: PipelineConfig) -> np.ndarray:
 
 
 def build_autoencoder(config: PipelineConfig) -> Model:
+    """
+    Improved Conv1D autoencoder:
+    - 3 encoder stages (was 2) for a tighter bottleneck
+    - BatchNormalization after each Conv1D for faster, more stable training
+    - Wider kernels (7, 5, 3) to capture transit shapes at multiple scales
+    - Linear output activation (was sigmoid) — correct for normalised flux near 1.0
+    - Adam with lr=1e-3 (unchanged default, but now paired with ReduceLROnPlateau)
+    """
     inputs = Input(shape=(config.data_points, 1))
-    x = Conv1D(32, 3, activation="relu", padding="same")(inputs)
-    x = MaxPooling1D(2, padding="same")(x)
-    x = Conv1D(16, 3, activation="relu", padding="same")(x)
-    encoded = MaxPooling1D(2, padding="same")(x)
 
+    # --- Encoder ---
+    x = Conv1D(64, 7, activation="relu", padding="same")(inputs)
+    x = BatchNormalization()(x)
+    x = MaxPooling1D(2, padding="same")(x)          # 500
+
+    x = Conv1D(32, 5, activation="relu", padding="same")(x)
+    x = BatchNormalization()(x)
+    x = MaxPooling1D(2, padding="same")(x)          # 250
+
+    x = Conv1D(16, 3, activation="relu", padding="same")(x)
+    x = BatchNormalization()(x)
+    encoded = MaxPooling1D(2, padding="same")(x)    # 125  ← bottleneck
+
+    # --- Decoder ---
     x = Conv1D(16, 3, activation="relu", padding="same")(encoded)
-    x = UpSampling1D(2)(x)
-    x = Conv1D(32, 3, activation="relu", padding="same")(x)
-    x = UpSampling1D(2)(x)
-    outputs = Conv1D(1, 3, activation="sigmoid", padding="same")(x)
+    x = BatchNormalization()(x)
+    x = UpSampling1D(2)(x)                          # 250
+
+    x = Conv1D(32, 5, activation="relu", padding="same")(x)
+    x = BatchNormalization()(x)
+    x = UpSampling1D(2)(x)                          # 500
+
+    x = Conv1D(64, 7, activation="relu", padding="same")(x)
+    x = BatchNormalization()(x)
+    x = UpSampling1D(2)(x)                          # 1000
+
+    # Linear activation: normalised flux is NOT bounded to [0,1]
+    outputs = Conv1D(1, 3, activation="linear", padding="same")(x)
 
     model = Model(inputs, outputs)
-    model.compile(optimizer="adam", loss="mse")
+    model.compile(optimizer=Adam(learning_rate=1e-3), loss="mse")
+    model.summary(print_fn=logging.info)
     return model
 
 
@@ -248,13 +288,23 @@ def run_training(config: PipelineConfig) -> bool:
         shuffle=True,
     )
 
+    # --- Data augmentation: double the training set with jittered/shifted copies ---
+    if config.augment_data:
+        rng = np.random.default_rng(config.random_state)
+        x_aug = augment_batch(x_train, rng)
+        x_train = np.concatenate([x_train, x_aug], axis=0)
+        logging.info("Augmentation enabled: training set expanded to %s samples.", len(x_train))
+
     model = build_autoencoder(config)
+
     callbacks = [
-        EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True, verbose=1),
+        EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True, verbose=1),
         ModelCheckpoint(config.model_path, monitor="val_loss", save_best_only=True, verbose=1),
+        # Halve LR when val_loss stalls for 4 epochs; floor at 1e-6
+        ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4, min_lr=1e-6, verbose=1),
     ]
 
-    logging.info("Starting training on %s samples.", len(x_train))
+    logging.info("Starting training on %s samples (val: %s).", len(x_train), len(x_val))
     model.fit(
         x_train,
         x_train,
@@ -265,6 +315,21 @@ def run_training(config: PipelineConfig) -> bool:
         verbose=1,
     )
     logging.info("Training completed. Best model saved to %s", config.model_path)
+
+    # --- Dynamic threshold: 95th-percentile MSE on validation set ---
+    try:
+        val_pred = model.predict(x_val, verbose=0)
+        val_mse = np.mean(np.square(x_val.squeeze() - val_pred.squeeze()), axis=1)
+        threshold_95 = float(np.percentile(val_mse, 95))
+        np.save(config.threshold_path, threshold_95)
+        logging.info(
+            "Auto-threshold (95th pct val MSE): %.6f  →  saved to %s",
+            threshold_95,
+            config.threshold_path,
+        )
+    except Exception as exc:
+        logging.warning("Could not compute auto-threshold: %s", exc)
+
     return True
 
 
@@ -273,6 +338,14 @@ def run_hunt(config: PipelineConfig) -> bool:
     if not config.model_path.exists():
         logging.error("Model file not found: %s", config.model_path)
         return False
+
+    # Load dynamic threshold if available, else fall back to a sensible default
+    if config.threshold_path.exists():
+        auto_threshold = float(np.load(config.threshold_path))
+        logging.info("Using auto-threshold from training: %.6f", auto_threshold)
+    else:
+        auto_threshold = None
+        logging.info("No auto-threshold found; using raw MSE scores only.")
 
     try:
         df_search = load_candidate_table(config.search_csv)
@@ -305,9 +378,17 @@ def run_hunt(config: PipelineConfig) -> bool:
             reconstruction = model.predict(input_data, verbose=0).flatten()
             mse_score = float(np.mean(np.square(data - reconstruction)))
 
-            results.append({"ID": star_id, "Score": mse_score, "Mission": mission})
+            is_anomaly = (auto_threshold is not None) and (mse_score > auto_threshold)
+            results.append({
+                "ID": star_id,
+                "Score": mse_score,
+                "Mission": mission,
+                "Anomaly": is_anomaly,
+                "Threshold": auto_threshold,
+            })
             checked_count += 1
-            logging.info("%s -> score %.6f", target, mse_score)
+            flag = " *** ANOMALY ***" if is_anomaly else ""
+            logging.info("%s -> score %.6f%s", target, mse_score, flag)
 
             if checked_count % config.checkpoint_every == 0:
                 save_results_atomic(results, config.result_file)
@@ -320,7 +401,11 @@ def run_hunt(config: PipelineConfig) -> bool:
         logging.warning("No hunt results were generated.")
         return False
 
-    logging.info("Hunt completed. Results saved to %s", config.result_file)
+    n_anomalies = sum(1 for r in results if r.get("Anomaly"))
+    logging.info(
+        "Hunt completed. %s targets checked, %s anomalies flagged. Results: %s",
+        checked_count, n_anomalies, config.result_file,
+    )
     return True
 
 
