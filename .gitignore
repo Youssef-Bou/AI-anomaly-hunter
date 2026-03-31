@@ -11,9 +11,7 @@ pipeline_train_data/
 *.csv
 keplerstellar.csv
 anomalie_ergebnisse.csv
-
-# Modelle (Optional: Wenn sie > 100MB sind, hier entkommentieren)
-# *.keras
+*.keras
 
 # Systemdateien
 .DS_Store
